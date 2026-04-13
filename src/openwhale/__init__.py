@@ -3,12 +3,22 @@
 __version__ = "0.1.0"
 __author__ = "OpenWhale Team"
 
-from .agents import AgentRunResult, AgentToolCall, BaseChallengeAgent, OpenAIChallengeAgent, create_agent
+from .agents import (
+	AgentRunResult,
+	AgentToolCall,
+	BaseChallengeAgent,
+	ClaudeCodeChallengeAgent,
+	DeepAgentsChallengeAgent,
+	OpenAIChallengeAgent,
+	create_agent,
+)
 
 __all__ = [
 	"AgentRunResult",
 	"AgentToolCall",
 	"BaseChallengeAgent",
+	"ClaudeCodeChallengeAgent",
+	"DeepAgentsChallengeAgent",
 	"OpenAIChallengeAgent",
 	"create_agent",
 	"__version__",

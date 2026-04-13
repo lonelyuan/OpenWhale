@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import sys
 import threading
-from typing import Optional
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -22,6 +22,21 @@ from .web.app import broadcast_message, run as run_web
 console = Console()
 
 
+def _pick_available_port(host: str, preferred_port: int, max_tries: int = 20) -> int:
+    """选择可用端口，优先使用配置端口。"""
+    for offset in range(max_tries):
+        port = preferred_port + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+                return port
+            except OSError:
+                continue
+
+    raise RuntimeError(f"无法在 {host} 上找到可用端口，起始端口: {preferred_port}")
+
+
 def _banner() -> None:
     """输出启动横幅"""
     banner = Text()
@@ -34,6 +49,7 @@ def _load_config() -> dict[str, str]:
     """从环境变量加载配置（支持 .env 文件）"""
     load_dotenv()
 
+    backend = os.getenv("AGENT_BACKEND", "openai_compat").lower()
     server_host = os.getenv("SERVER_HOST", "")
     mcp_server_url = os.getenv("MCP_SERVER_URL", "")
     if not mcp_server_url and server_host:
@@ -48,14 +64,43 @@ def _load_config() -> dict[str, str]:
         "AGENT_TOKEN": os.getenv("AGENT_TOKEN", ""),
         "SERVER_HOST": server_host,
         "MCP_SERVER_URL": mcp_server_url,
-        "MODEL_API_KEY": model_api_key,
     }
 
+    if backend in {
+        "openai",
+        "openai_compat",
+        "minimax",
+        "chat_completions",
+        "deepagents",
+        "claude",
+        "claude_code",
+        "claude_sdk",
+        "claude-agent-sdk",
+    }:
+        required_vars["MODEL_API_KEY"] = model_api_key
+
     optional_vars = {
-        "AGENT_BACKEND": os.getenv("AGENT_BACKEND", "openai_compat"),
+        "AGENT_BACKEND": backend,
+        "CHALLENGE_MCP_SERVER_NAME": os.getenv("CHALLENGE_MCP_SERVER_NAME", "challenge"),
         "MODEL_BASE_URL": os.getenv("MODEL_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
         "MODEL_NAME": os.getenv("MODEL_NAME", "MiniMax-M2.7"),
         "MODEL_ID": os.getenv("MODEL_ID", "ep-jsc7o0kw"),
+        "DEEPAGENTS_TIMEOUT_SECONDS": os.getenv("DEEPAGENTS_TIMEOUT_SECONDS", "300"),
+        "DEEPAGENTS_REPEAT_CALL_LIMIT": os.getenv("DEEPAGENTS_REPEAT_CALL_LIMIT", "4"),
+        "DEEPAGENTS_RECURSION_LIMIT": os.getenv("DEEPAGENTS_RECURSION_LIMIT", "64"),
+        "DEEPAGENTS_BASH_TIMEOUT_SECONDS": os.getenv("DEEPAGENTS_BASH_TIMEOUT_SECONDS", "120"),
+        "DEEPAGENTS_BASH_MAX_OUTPUT_CHARS": os.getenv("DEEPAGENTS_BASH_MAX_OUTPUT_CHARS", "8000"),
+        "DEEPAGENTS_TRACE_ENABLED": os.getenv("DEEPAGENTS_TRACE_ENABLED", "false"),
+        "CLAUDE_API_KEY": os.getenv("CLAUDE_API_KEY", ""),
+        "CLAUDE_BASE_URL": os.getenv("CLAUDE_BASE_URL", ""),
+        "CLAUDE_MODEL": os.getenv("CLAUDE_MODEL") or os.getenv("MODEL_ID", "ep-jsc7o0kw"),
+        "CLAUDE_CLI_PATH": os.getenv("CLAUDE_CLI_PATH", ""),
+        "CLAUDE_TOOLS_PRESET": os.getenv("CLAUDE_TOOLS_PRESET", "claude_code"),
+        "CLAUDE_PERMISSION_MODE": os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions"),
+        "CLAUDE_ALLOWED_TOOLS": os.getenv("CLAUDE_ALLOWED_TOOLS", ""),
+        "CLAUDE_DISALLOWED_TOOLS": os.getenv("CLAUDE_DISALLOWED_TOOLS", ""),
+        "EXTRA_MCP_SERVERS_JSON": os.getenv("EXTRA_MCP_SERVERS_JSON", ""),
+        "EXTRA_MCP_SERVERS_FILE": os.getenv("EXTRA_MCP_SERVERS_FILE", ""),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
         "WEB_HOST": os.getenv("WEB_HOST", "0.0.0.0"),
         "WEB_PORT": os.getenv("WEB_PORT", "8080"),
@@ -79,6 +124,7 @@ async def _run_agent(config: dict[str, str]) -> None:
     """异步运行智能体主流程"""
     mcp_url = config["MCP_SERVER_URL"]
     agent_token = config["AGENT_TOKEN"]
+    backend = config["AGENT_BACKEND"]
 
     def on_message(role: str, content: str) -> None:
         """消息回调：转发给 Web 前端"""
@@ -89,29 +135,39 @@ async def _run_agent(config: dict[str, str]) -> None:
     broadcast_message(
         "system",
         "OpenWhale 启动 | "
-        f"AgentBackend: {config['AGENT_BACKEND']} | MCP服务器: {mcp_url} | "
-        f"模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | BaseURL: {config['MODEL_BASE_URL']}",
+        f"AgentBackend: {backend} | MCP服务器: {mcp_url} | "
+        + (
+            f"模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | BaseURL: {config['MODEL_BASE_URL']}"
+            if backend in {"openai", "openai_compat", "minimax", "chat_completions", "deepagents"}
+            else f"Claude模型: {config['CLAUDE_MODEL']} | MiniMax网关: {config['MODEL_BASE_URL']}"
+        ),
     )
 
     try:
-        async with create_mcp_session(mcp_url, agent_token=agent_token) as mcp_session:
-            logger.info("开始执行赛题流程...")
-            broadcast_message("system", "开始执行赛题流程...")
+        if backend in {"claude", "claude_code", "claude_sdk", "claude-agent-sdk"}:
+            logger.info("开始执行 Claude Code SDK 赛题流程...")
+            broadcast_message("system", "开始执行 Claude Code SDK 赛题流程...")
 
-            report = await agent.run_competition(mcp_session)
+            report = await agent.run_competition()
+        else:
+            async with create_mcp_session(mcp_url, agent_token=agent_token) as mcp_session:
+                logger.info("开始执行赛题流程...")
+                broadcast_message("system", "开始执行赛题流程...")
 
-            logger.success("流程执行完成！")
-            broadcast_message("system", "流程执行完成！")
+                report = await agent.run_competition(mcp_session)
 
-            # 在控制台输出最终结果
-            console.print(
-                Panel(
-                    report.final_message or "(模型未输出最终文本)",
-                    title="[bold green]执行报告[/bold green]",
-                    border_style="green",
-                    padding=(1, 2),
-                )
+        logger.success("流程执行完成！")
+        broadcast_message("system", "流程执行完成！")
+
+        # 在控制台输出最终结果
+        console.print(
+            Panel(
+                report.final_message or "(模型未输出最终文本)",
+                title="[bold green]执行报告[/bold green]",
+                border_style="green",
+                padding=(1, 2),
             )
+        )
 
     except Exception as e:
         logger.error(f"智能体运行失败: {e}")
@@ -133,15 +189,32 @@ def main() -> None:
     # 初始化日志
     setup_logging(config["LOG_LEVEL"])
 
+    backend = config["AGENT_BACKEND"]
+    if backend in {"openai", "openai_compat", "minimax", "chat_completions", "deepagents"}:
+        model_info = f"模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | BaseURL: {config['MODEL_BASE_URL']}"
+    else:
+        claude_base_url = config["CLAUDE_BASE_URL"] or config["MODEL_BASE_URL"]
+        model_info = (
+            f"Claude模型: {config['CLAUDE_MODEL']} | Claude网关: {claude_base_url} | "
+            f"permission_mode: {config['CLAUDE_PERMISSION_MODE']}"
+        )
+
     logger.info(
         "配置加载完成 | "
-        f"AgentBackend: {config['AGENT_BACKEND']} | 模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | "
-        f"BaseURL: {config['MODEL_BASE_URL']} | MCP: {config['MCP_SERVER_URL']}"
+        f"AgentBackend: {backend} | {model_info} | MCP: {config['MCP_SERVER_URL']}"
     )
 
     # 启动 Web 前端（后台线程）
     web_enabled = config["WEB_ENABLED"].lower() in ("1", "true", "yes")
     if web_enabled:
+        preferred_port = int(config["WEB_PORT"])
+        selected_port = _pick_available_port(config["WEB_HOST"], preferred_port)
+        if selected_port != preferred_port:
+            logger.warning(
+                f"Web 端口 {preferred_port} 已占用，自动切换到 {selected_port}"
+            )
+            config["WEB_PORT"] = str(selected_port)
+
         web_thread = threading.Thread(
             target=run_web,
             kwargs={
