@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
 from loguru import logger
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -14,15 +12,25 @@ from mcp.types import Tool
 
 
 @asynccontextmanager
-async def create_mcp_session(server_url: str, timeout: float = 30.0):
+async def create_mcp_session(
+    server_url: str,
+    agent_token: str,
+    timeout: float = 30.0,
+):
     """创建 MCP 会话的异步上下文管理器（Streamable HTTP 传输）
 
     Args:
         server_url: MCP 服务器地址，例如 http://<SERVER_HOST>/mcp
+        agent_token: 比赛平台 AGENT_TOKEN（用于 Authorization Header）
         timeout: 连接超时秒数
     """
     logger.info(f"正在连接 MCP 服务器: {server_url}")
-    async with streamablehttp_client(server_url, timeout=httpx.Timeout(timeout)) as (
+    headers = {"Authorization": f"Bearer {agent_token}"}
+    async with streamablehttp_client(
+        server_url,
+        headers=headers,
+        timeout=timeout,
+    ) as (
         read,
         write,
         _,
@@ -60,14 +68,17 @@ async def call_tool(
     return result
 
 
-def tools_to_anthropic_format(tools: list[Tool]) -> list[dict[str, Any]]:
-    """将 MCP 工具格式转换为 Anthropic Claude API 所需的工具格式"""
-    anthropic_tools = []
+def tools_to_openai_format(tools: list[Tool]) -> list[dict[str, Any]]:
+    """将 MCP 工具格式转换为 OpenAI Chat Completions 的工具格式"""
+    openai_tools = []
     for tool in tools:
-        anthropic_tool = {
-            "name": tool.name,
-            "description": tool.description or "",
-            "input_schema": tool.inputSchema if tool.inputSchema else {"type": "object", "properties": {}},
+        openai_tool = {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.inputSchema if tool.inputSchema else {"type": "object", "properties": {}},
+            },
         }
-        anthropic_tools.append(anthropic_tool)
-    return anthropic_tools
+        openai_tools.append(openai_tool)
+    return openai_tools

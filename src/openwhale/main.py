@@ -14,9 +14,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .agent import PenetrationAgent
-from .logging_config import setup_logging
-from .mcp_client import create_mcp_session
+from .agents import create_agent
+from .util.logging_config import setup_logging
+from .util.mcp_client import create_mcp_session
 from .web.app import broadcast_message, run as run_web
 
 console = Console()
@@ -34,13 +34,28 @@ def _load_config() -> dict[str, str]:
     """从环境变量加载配置（支持 .env 文件）"""
     load_dotenv()
 
+    server_host = os.getenv("SERVER_HOST", "")
+    mcp_server_url = os.getenv("MCP_SERVER_URL", "")
+    if not mcp_server_url and server_host:
+        if server_host.startswith("http://") or server_host.startswith("https://"):
+            mcp_server_url = f"{server_host.rstrip('/')}/mcp"
+        else:
+            mcp_server_url = f"http://{server_host.rstrip('/')}/mcp"
+
+    model_api_key = os.getenv("TOKENHUB_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+
     required_vars = {
-        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-        "MCP_SERVER_URL": os.getenv("MCP_SERVER_URL", ""),
+        "AGENT_TOKEN": os.getenv("AGENT_TOKEN", ""),
+        "SERVER_HOST": server_host,
+        "MCP_SERVER_URL": mcp_server_url,
+        "MODEL_API_KEY": model_api_key,
     }
 
     optional_vars = {
-        "CLAUDE_MODEL": os.getenv("CLAUDE_MODEL", "claude-opus-4-5"),
+        "AGENT_BACKEND": os.getenv("AGENT_BACKEND", "openai_compat"),
+        "MODEL_BASE_URL": os.getenv("MODEL_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
+        "MODEL_NAME": os.getenv("MODEL_NAME", "MiniMax-M2.7"),
+        "MODEL_ID": os.getenv("MODEL_ID", "ep-jsc7o0kw"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
         "WEB_HOST": os.getenv("WEB_HOST", "0.0.0.0"),
         "WEB_PORT": os.getenv("WEB_PORT", "8080"),
@@ -63,36 +78,36 @@ def _load_config() -> dict[str, str]:
 async def _run_agent(config: dict[str, str]) -> None:
     """异步运行智能体主流程"""
     mcp_url = config["MCP_SERVER_URL"]
-    api_key = config["ANTHROPIC_API_KEY"]
-    model = config["CLAUDE_MODEL"]
+    agent_token = config["AGENT_TOKEN"]
 
     def on_message(role: str, content: str) -> None:
         """消息回调：转发给 Web 前端"""
         broadcast_message(role, content)
 
-    agent = PenetrationAgent(
-        api_key=api_key,
-        model=model,
-        on_message=on_message,
+    agent = create_agent(config, on_message=on_message)
+
+    broadcast_message(
+        "system",
+        "OpenWhale 启动 | "
+        f"AgentBackend: {config['AGENT_BACKEND']} | MCP服务器: {mcp_url} | "
+        f"模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | BaseURL: {config['MODEL_BASE_URL']}",
     )
 
-    broadcast_message("system", f"OpenWhale 启动 | MCP服务器: {mcp_url} | 模型: {model}")
-
     try:
-        async with create_mcp_session(mcp_url) as mcp_session:
-            logger.info("开始执行赛题侦察...")
-            broadcast_message("system", "开始执行赛题侦察...")
+        async with create_mcp_session(mcp_url, agent_token=agent_token) as mcp_session:
+            logger.info("开始执行赛题流程...")
+            broadcast_message("system", "开始执行赛题流程...")
 
-            report = await agent.run_recon(mcp_session)
+            report = await agent.run_competition(mcp_session)
 
-            logger.success("侦察完成！")
-            broadcast_message("system", "侦察完成！")
+            logger.success("流程执行完成！")
+            broadcast_message("system", "流程执行完成！")
 
             # 在控制台输出最终结果
             console.print(
                 Panel(
-                    report,
-                    title="[bold green]侦察报告[/bold green]",
+                    report.final_message or "(模型未输出最终文本)",
+                    title="[bold green]执行报告[/bold green]",
                     border_style="green",
                     padding=(1, 2),
                 )
@@ -102,6 +117,10 @@ async def _run_agent(config: dict[str, str]) -> None:
         logger.error(f"智能体运行失败: {e}")
         broadcast_message("system", f"错误: {e}")
         raise
+    except KeyboardInterrupt:
+        logger.warning("用户中断运行，已停止智能体")
+        broadcast_message("system", "用户中断运行，已停止智能体")
+        return
 
 
 def main() -> None:
@@ -114,7 +133,11 @@ def main() -> None:
     # 初始化日志
     setup_logging(config["LOG_LEVEL"])
 
-    logger.info(f"配置加载完成 | 模型: {config['CLAUDE_MODEL']} | MCP: {config['MCP_SERVER_URL']}")
+    logger.info(
+        "配置加载完成 | "
+        f"AgentBackend: {config['AGENT_BACKEND']} | 模型: {config['MODEL_NAME']} ({config['MODEL_ID']}) | "
+        f"BaseURL: {config['MODEL_BASE_URL']} | MCP: {config['MCP_SERVER_URL']}"
+    )
 
     # 启动 Web 前端（后台线程）
     web_enabled = config["WEB_ENABLED"].lower() in ("1", "true", "yes")

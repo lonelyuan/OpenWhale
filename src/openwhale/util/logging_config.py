@@ -1,6 +1,7 @@
 """日志配置 - 使用 loguru + rich 管理日志"""
 
-import sys
+from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
 
@@ -8,10 +9,8 @@ from loguru import logger
 from rich.console import Console
 from rich.logging import RichHandler
 
-# 全局 rich 控制台（供其他模块使用）
 console = Console()
 
-# 日志目录
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -20,7 +19,6 @@ def setup_logging(log_level: str = "INFO") -> None:
     """初始化日志配置：控制台使用 rich，文件保存全量日志"""
     logger.remove()
 
-    # 控制台处理器：通过 rich 输出，支持彩色和格式化
     logger.add(
         RichHandler(console=console, rich_tracebacks=True, show_path=False),
         level=log_level,
@@ -28,7 +26,6 @@ def setup_logging(log_level: str = "INFO") -> None:
         colorize=False,
     )
 
-    # 文件处理器：每次运行保存完整日志，确保流程可追溯
     log_file = LOG_DIR / f"openwhale_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logger.add(
         str(log_file),
